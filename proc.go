@@ -6,9 +6,9 @@ import (
 
 // Proc describes a process and its children.
 type Proc struct {
-	Pid      int     `json:"pid"`
-	Ppid     int     `json:"ppid"`
-	Children []*Proc `json:"children"`
+	Pid      int
+	Ppid     int
+	Children []*Proc
 }
 
 // Kill kills a process and its children.

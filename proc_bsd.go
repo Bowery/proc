@@ -3,56 +3,63 @@
 package proc
 
 import (
-	"bufio"
-	"bytes"
-	"os/exec"
-	"strconv"
-	"strings"
+	"encoding/binary"
+	"syscall"
+	"unsafe"
 )
 
-func ps(args ...string) (*bytes.Buffer, error) {
-	var stdout bytes.Buffer
-	cmd := exec.Command("ps", args...)
-	cmd.Stdout = &stdout
+var (
+	allProcs = []int32{1, 14, 0} // CTL_KERN, KERN_PROC, KERN_PROC_ALL
+	// The following are sizes and offsets so we can easily get the fields out
+	// of the output without having to map out the entirety of kinfo_proc since
+	// it is quite large.
+	kinfoProcSize    = 648
+	kinfoProcPidOff  = 40
+	kinfoProcPpidOff = 560
+)
 
-	if err := cmd.Run(); err != nil {
-		eErr, ok := err.(*exec.ExitError)
-		if ok && !eErr.Success() {
-			return &stdout, nil
-		}
+// sysctl implements access to the sysctl calling interface.
+func sysctl(mib []int32, old *byte, oldlen *uintptr, new *byte, newlen uintptr) error {
+	var err error
+	mibptr := unsafe.Pointer(&mib[0])
 
-		return nil, err
+	_, _, e1 := syscall.Syscall6(syscall.SYS___SYSCTL, uintptr(mibptr), uintptr(len(mib)),
+		uintptr(unsafe.Pointer(old)), uintptr(unsafe.Pointer(oldlen)),
+		uintptr(unsafe.Pointer(new)), uintptr(newlen))
+	if e1 != 0 {
+		err = e1
 	}
 
-	return &stdout, nil
+	return err
 }
 
 // listProcs returns a list of the running processes.
 func listProcs() ([]*Proc, error) {
-	buf, err := ps("-x", "-o", "pid= ppid=")
+	var size uintptr
+	var procs []*Proc
+
+	// Get the byte size of all the process structures.
+	err := sysctl(allProcs, nil, &size, nil, 0)
+	if err != nil {
+		return nil, err
+	}
+	data := make([]byte, size)
+
+	// Fill in data with the processes structures.
+	err = sysctl(allProcs, &data[0], &size, nil, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	var procs []*Proc
-	scanner := bufio.NewScanner(buf)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
+	// Get the process information for the processes.
+	num := int(size) / kinfoProcSize
+	for i := 0; i < num; i++ {
+		structure := data[i*kinfoProcSize:]
+		pid := binary.LittleEndian.Uint32(structure[kinfoProcPidOff : kinfoProcPidOff+4])
+		ppid := binary.LittleEndian.Uint32(structure[kinfoProcPpidOff : kinfoProcPpidOff+4])
 
-		// If the field can't be converted to a number skip.
-		// It's probably the name of the column or something similar.
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-
-		procs = append(procs, &Proc{Pid: pid, Ppid: ppid})
+		procs = append(procs, &Proc{Pid: int(pid), Ppid: int(ppid)})
 	}
 
-	return procs, scanner.Err()
+	return procs, nil
 }
